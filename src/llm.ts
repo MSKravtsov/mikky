@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "./config.js";
-import { db } from "./db.js";
+import { supabase } from "./supabase.js";
 import type { Tool } from "./tools/index.js";
 
 const client = new Anthropic({ apiKey: config.anthropicKey });
@@ -58,15 +58,16 @@ export interface Message {
 }
 
 // ─── Build dynamic system prompt with user context ───────────────────
-function buildSystemPrompt(): string {
+async function buildSystemPrompt(): Promise<string> {
     let prompt = BASE_SYSTEM_PROMPT;
 
     // Inject user profile
-    const profileRows = db
-        .prepare("SELECT key, value FROM profile ORDER BY key")
-        .all() as Array<{ key: string; value: string }>;
+    const { data: profileRows } = await supabase
+        .from("profile")
+        .select("key, value")
+        .order("key");
 
-    if (profileRows.length > 0) {
+    if (profileRows && profileRows.length > 0) {
         prompt += "\n\n## About the User\n";
         for (const row of profileRows) {
             prompt += `- **${row.key}**: ${row.value}\n`;
@@ -74,13 +75,13 @@ function buildSystemPrompt(): string {
     }
 
     // Inject recent memories (last 10 for context)
-    const memories = db
-        .prepare(
-            "SELECT content, category FROM memories ORDER BY created_at DESC LIMIT 10"
-        )
-        .all() as Array<{ content: string; category: string }>;
+    const { data: memories } = await supabase
+        .from("memories")
+        .select("content, category")
+        .order("created_at", { ascending: false })
+        .limit(10);
 
-    if (memories.length > 0) {
+    if (memories && memories.length > 0) {
         prompt += "\n\n## Recent Memories\n";
         for (const mem of memories) {
             prompt += `- [${mem.category}] ${mem.content}\n`;
@@ -100,7 +101,7 @@ export async function chat(
         input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
     }));
 
-    const systemPrompt = buildSystemPrompt();
+    const systemPrompt = await buildSystemPrompt();
 
     return client.messages.create({
         model: MODEL,

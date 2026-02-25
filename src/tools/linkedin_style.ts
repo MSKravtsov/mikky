@@ -1,5 +1,5 @@
 import { registerTool } from "./index.js";
-import { db } from "../db.js";
+import { supabase } from "../supabase.js";
 
 // ─── Andrew Ng default style (auto-seeded) ───────────────────────────
 const ANDREW_NG_STYLE = `STYLE NAME: Andrew Ng — Warm Thought Leader
@@ -56,30 +56,27 @@ registerTool({
     },
     async execute(): Promise<string> {
         // Try to find active style
-        let style = db
-            .prepare(
-                "SELECT id, name, style_guide FROM linkedin_styles WHERE is_active = 1 LIMIT 1"
-            )
-            .get() as
-            | { id: number; name: string; style_guide: string }
-            | undefined;
+        let { data: style } = await supabase
+            .from("linkedin_styles")
+            .select("id, name, style_guide")
+            .eq("is_active", true)
+            .limit(1)
+            .maybeSingle();
 
         // Auto-seed if table is empty
         if (!style) {
-            const count = db
-                .prepare("SELECT COUNT(*) as cnt FROM linkedin_styles")
-                .get() as { cnt: number };
+            const { count } = await supabase
+                .from("linkedin_styles")
+                .select("*", { count: "exact", head: true });
 
-            if (count.cnt === 0) {
-                db.prepare(
-                    "INSERT INTO linkedin_styles (name, style_guide, is_active) VALUES (?, ?, 1)"
-                ).run("andrew_ng", ANDREW_NG_STYLE);
+            if (count === 0) {
+                const { data: seeded } = await supabase
+                    .from("linkedin_styles")
+                    .insert({ name: "andrew_ng", style_guide: ANDREW_NG_STYLE, is_active: true })
+                    .select("id, name, style_guide")
+                    .single();
 
-                style = {
-                    id: 1,
-                    name: "andrew_ng",
-                    style_guide: ANDREW_NG_STYLE,
-                };
+                style = seeded;
             }
         }
 
@@ -130,20 +127,24 @@ registerTool({
         const setActive = (input.set_active as boolean) ?? true;
 
         // Upsert the style
-        db.prepare(
-            `INSERT INTO linkedin_styles (name, style_guide, is_active)
-             VALUES (?, ?, ?)
-             ON CONFLICT(name) DO UPDATE SET
-               style_guide = excluded.style_guide,
-               is_active = excluded.is_active,
-               updated_at = datetime('now')`
-        ).run(name, styleGuide, setActive ? 1 : 0);
+        await supabase
+            .from("linkedin_styles")
+            .upsert(
+                {
+                    name,
+                    style_guide: styleGuide,
+                    is_active: setActive,
+                    updated_at: new Date().toISOString(),
+                },
+                { onConflict: "name" }
+            );
 
         // If setting active, deactivate all others
         if (setActive) {
-            db.prepare(
-                "UPDATE linkedin_styles SET is_active = 0 WHERE name != ?"
-            ).run(name);
+            await supabase
+                .from("linkedin_styles")
+                .update({ is_active: false })
+                .neq("name", name);
         }
 
         return JSON.stringify({
@@ -163,18 +164,12 @@ registerTool({
         required: [],
     },
     async execute(): Promise<string> {
-        const styles = db
-            .prepare(
-                "SELECT id, name, is_active, created_at FROM linkedin_styles ORDER BY name"
-            )
-            .all() as Array<{
-                id: number;
-                name: string;
-                is_active: number;
-                created_at: string;
-            }>;
+        const { data: styles } = await supabase
+            .from("linkedin_styles")
+            .select("id, name, is_active, created_at")
+            .order("name");
 
-        if (styles.length === 0) {
+        if (!styles || styles.length === 0) {
             return JSON.stringify({
                 styles: [],
                 message: "No styles saved yet.",
@@ -182,9 +177,9 @@ registerTool({
         }
 
         return JSON.stringify({
-            styles: styles.map((s) => ({
+            styles: styles.map((s: any) => ({
                 name: s.name,
-                active: s.is_active === 1,
+                active: s.is_active,
                 created_at: s.created_at,
             })),
         });

@@ -2,10 +2,11 @@ import Anthropic from "@anthropic-ai/sdk";
 import { chat, type Message } from "./llm.js";
 import { getAllTools, getTool } from "./tools/index.js";
 import { config } from "./config.js";
-import { contextManager } from "./context.js";
+import { getContextManager } from "./context.js";
 
 export async function runAgent(userMessage: string): Promise<string> {
     const tools = getAllTools();
+    const contextManager = await getContextManager();
 
     // Add to context manager history
     contextManager.addMessage("user", userMessage);

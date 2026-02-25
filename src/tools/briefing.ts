@@ -1,4 +1,5 @@
 import { registerTool } from "./index.js";
+import { supabase } from "../supabase.js";
 
 // ─── Tool: get_weather ───────────────────────────────────────────────
 // Uses Open-Meteo API (free, no API key required)
@@ -113,41 +114,37 @@ registerTool({
     async execute(input: Record<string, unknown>): Promise<string> {
         const city = (input.city as string) || "Berlin";
 
-        // This tool just gathers the data — the LLM will compose the briefing
-        // We import db dynamically to avoid circular deps
-        const { db } = await import("../db.js");
-
         // Pending confirmed topics
-        const pendingTopics = db
-            .prepare(
-                "SELECT day_index, topic FROM topics WHERE status = 'confirmed' ORDER BY day_index"
-            )
-            .all() as Array<{ day_index: number; topic: string }>;
+        const { data: pendingTopics } = await supabase
+            .from("topics")
+            .select("day_index, topic")
+            .eq("status", "confirmed")
+            .order("day_index");
 
         // Recent memories
-        const recentMemories = db
-            .prepare(
-                "SELECT content, category FROM memories ORDER BY created_at DESC LIMIT 5"
-            )
-            .all() as Array<{ content: string; category: string }>;
+        const { data: recentMemories } = await supabase
+            .from("memories")
+            .select("content, category")
+            .order("created_at", { ascending: false })
+            .limit(5);
 
         // Scheduled tasks
         let scheduledTasks: unknown[] = [];
         try {
-            scheduledTasks = db
-                .prepare(
-                    "SELECT name, cron, last_run FROM scheduled_tasks WHERE enabled = 1"
-                )
-                .all();
+            const { data } = await supabase
+                .from("scheduled_tasks")
+                .select("name, cron, last_run")
+                .eq("enabled", true);
+            scheduledTasks = data ?? [];
         } catch {
             // Table may not exist yet
         }
 
         return JSON.stringify({
             city,
-            pending_linkedin_topics: pendingTopics.length,
-            topics: pendingTopics,
-            recent_memories: recentMemories,
+            pending_linkedin_topics: pendingTopics?.length ?? 0,
+            topics: pendingTopics ?? [],
+            recent_memories: recentMemories ?? [],
             scheduled_tasks: scheduledTasks,
             instruction:
                 "Compile a friendly morning briefing. Include weather (call get_weather), pending tasks, and any relevant reminders from memory.",

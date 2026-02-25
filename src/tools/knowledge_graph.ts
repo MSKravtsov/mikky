@@ -6,7 +6,7 @@ import {
     getConnections,
     traverseGraph,
 } from "../knowledge_graph.js";
-import { db } from "../db.js";
+import { supabase } from "../supabase.js";
 
 // ─── Tool: add_entity ────────────────────────────────────────────────
 registerTool({
@@ -31,7 +31,7 @@ registerTool({
         required: ["name", "type"],
     },
     async execute(input: Record<string, unknown>): Promise<string> {
-        const entity = addEntity(
+        const entity = await addEntity(
             input.name as string,
             input.type as string,
             (input.properties as Record<string, unknown>) || {}
@@ -65,14 +65,14 @@ registerTool({
         required: ["from_name", "from_type", "to_name", "to_type", "relationship"],
     },
     async execute(input: Record<string, unknown>): Promise<string> {
-        const from = findEntity(input.from_name as string, input.from_type as string);
-        const to = findEntity(input.to_name as string, input.to_type as string);
+        const from = await findEntity(input.from_name as string, input.from_type as string);
+        const to = await findEntity(input.to_name as string, input.to_type as string);
 
         // Auto-create entities if they don't exist
-        const fromEntity = from || addEntity(input.from_name as string, input.from_type as string);
-        const toEntity = to || addEntity(input.to_name as string, input.to_type as string);
+        const fromEntity = from || await addEntity(input.from_name as string, input.from_type as string);
+        const toEntity = to || await addEntity(input.to_name as string, input.to_type as string);
 
-        const rel = addRelationship(
+        const rel = await addRelationship(
             fromEntity.id,
             toEntity.id,
             input.relationship as string
@@ -99,7 +99,7 @@ registerTool({
         required: ["name"],
     },
     async execute(input: Record<string, unknown>): Promise<string> {
-        const entity = findEntity(
+        const entity = await findEntity(
             input.name as string,
             input.type as string | undefined
         );
@@ -110,13 +110,13 @@ registerTool({
             });
         }
 
-        const connections = getConnections(entity.id);
+        const connections = await getConnections(entity.id);
         return JSON.stringify({
             entity: {
                 id: entity.id,
                 name: entity.name,
                 type: entity.type,
-                properties: JSON.parse(entity.properties as unknown as string),
+                properties: entity.properties,
             },
             connections: connections.map((c) => ({
                 relationship: c.relationship,
@@ -144,7 +144,7 @@ registerTool({
         required: ["name"],
     },
     async execute(input: Record<string, unknown>): Promise<string> {
-        const entity = findEntity(input.name as string);
+        const entity = await findEntity(input.name as string);
         if (!entity) {
             return JSON.stringify({
                 error: `Entity "${input.name}" not found.`,
@@ -152,7 +152,7 @@ registerTool({
         }
 
         const maxDepth = (input.max_depth as number) || 3;
-        const results = traverseGraph(entity.id, maxDepth);
+        const results = await traverseGraph(entity.id, maxDepth);
 
         return JSON.stringify({
             start: entity.name,
@@ -182,17 +182,21 @@ registerTool({
         const type = input.type as string | undefined;
         const limit = (input.limit as number) || 50;
 
-        let entities;
+        let q = supabase
+            .from("entities")
+            .select("id, name, type")
+            .order("name")
+            .limit(limit);
+
         if (type) {
-            entities = db
-                .prepare("SELECT id, name, type FROM entities WHERE type = ? ORDER BY name LIMIT ?")
-                .all(type, limit);
-        } else {
-            entities = db
-                .prepare("SELECT id, name, type FROM entities ORDER BY type, name LIMIT ?")
-                .all(limit);
+            q = q.eq("type", type);
         }
 
-        return JSON.stringify({ entities, count: (entities as unknown[]).length });
+        const { data: entities } = await q;
+
+        return JSON.stringify({
+            entities: entities ?? [],
+            count: entities?.length ?? 0,
+        });
     },
 });

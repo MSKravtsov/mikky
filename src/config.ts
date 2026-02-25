@@ -6,6 +6,8 @@ export interface Config {
     groqApiKey: string | undefined;
     allowedUserIds: number[];
     maxAgentIterations: number;
+    supabaseUrl: string;
+    supabaseKey: string;
 }
 
 function requireEnv(name: string): string {
@@ -44,4 +46,6 @@ export const config: Config = {
     groqApiKey: process.env.GROQ_API_KEY,
     allowedUserIds: parseUserIds(requireEnv("ALLOWED_USER_IDS")),
     maxAgentIterations: Number(process.env.MAX_AGENT_ITERATIONS) || 10,
+    supabaseUrl: requireEnv("SUPABASE_URL"),
+    supabaseKey: requireEnv("SUPABASE_KEY"),
 };

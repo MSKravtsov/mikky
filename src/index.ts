@@ -1,15 +1,18 @@
 // ─── Gravity Claw — Entry Point ──────────────────────────────────────
-// Load config first (validates env vars), then DB, then all modules.
+// Load config first (validates env vars), then Supabase, then all modules.
 
 import { config } from "./config.js";
 
-// Initialize database (auto-creates tables)
+// Initialize Supabase client
+import "./supabase.js";
+
+// Initialize database layer (re-exports supabase)
 import "./db.js";
 
-// Initialize knowledge graph (creates entity/relationship tables)
+// Initialize knowledge graph
 import "./knowledge_graph.js";
 
-// Initialize self-evolving memory (adds tracking columns)
+// Initialize self-evolving memory
 import "./memory_evolution.js";
 
 // Register all tools (side-effect imports)
@@ -36,6 +39,7 @@ import { startHeartbeat } from "./heartbeat.js";
 console.log("🪐 Gravity Claw");
 console.log(`   Allowed users: [${config.allowedUserIds.join(", ")}]`);
 console.log(`   Max agent iterations: ${config.maxAgentIterations}`);
+console.log(`   Database: Supabase Postgres`);
 console.log("");
 
 // Start scheduled tasks (LinkedIn post delivery)

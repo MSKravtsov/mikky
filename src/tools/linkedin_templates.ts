@@ -1,5 +1,5 @@
 import { registerTool } from "./index.js";
-import { db } from "../db.js";
+import { supabase } from "../supabase.js";
 
 // ─── Tool: save_template ─────────────────────────────────────────────
 registerTool({
@@ -25,10 +25,13 @@ registerTool({
         const name = input.name as string;
         const content = input.content as string;
 
-        db.prepare(
-            `INSERT INTO templates (name, content) VALUES (?, ?)
-       ON CONFLICT(name) DO UPDATE SET content = excluded.content`
-        ).run(name, content);
+        const { error } = await supabase
+            .from("templates")
+            .upsert({ name, content }, { onConflict: "name" });
+
+        if (error) {
+            return JSON.stringify({ error: `Failed to save template: ${error.message}` });
+        }
 
         return JSON.stringify({
             success: true,
@@ -47,16 +50,12 @@ registerTool({
         required: [],
     },
     async execute(): Promise<string> {
-        const templates = db
-            .prepare("SELECT id, name, content, created_at FROM templates ORDER BY name")
-            .all() as Array<{
-                id: number;
-                name: string;
-                content: string;
-                created_at: string;
-            }>;
+        const { data: templates } = await supabase
+            .from("templates")
+            .select("id, name, content, created_at")
+            .order("name");
 
-        if (templates.length === 0) {
+        if (!templates || templates.length === 0) {
             return JSON.stringify({
                 templates: [],
                 message: "No templates saved yet. Ask the user to provide a post template.",
@@ -84,9 +83,11 @@ registerTool({
     async execute(input: Record<string, unknown>): Promise<string> {
         const name = input.name as string;
 
-        const template = db
-            .prepare("SELECT id, name, content FROM templates WHERE name = ?")
-            .get(name) as { id: number; name: string; content: string } | undefined;
+        const { data: template } = await supabase
+            .from("templates")
+            .select("id, name, content")
+            .eq("name", name)
+            .maybeSingle();
 
         if (!template) {
             return JSON.stringify({

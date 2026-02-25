@@ -1,73 +1,96 @@
-import { db } from "./db.js";
-
-// ─── Add access tracking columns (safe — IF NOT EXISTS equivalent) ──
-try {
-    db.exec("ALTER TABLE memories ADD COLUMN access_count INTEGER DEFAULT 0");
-} catch {
-    // Column already exists
-}
-try {
-    db.exec(
-        "ALTER TABLE memories ADD COLUMN last_accessed TEXT DEFAULT (datetime('now'))"
-    );
-} catch {
-    // Column already exists
-}
-try {
-    db.exec("ALTER TABLE memories ADD COLUMN relevance REAL DEFAULT 1.0");
-} catch {
-    // Column already exists
-}
+import { supabase } from "./supabase.js";
 
 // ─── Track memory access ─────────────────────────────────────────────
-export function trackAccess(memoryId: number): void {
-    db.prepare(
-        "UPDATE memories SET access_count = access_count + 1, last_accessed = datetime('now') WHERE id = ?"
-    ).run(memoryId);
+export async function trackAccess(memoryId: number): Promise<void> {
+    // Increment access_count and update last_accessed
+    const { data: current } = await supabase
+        .from("memories")
+        .select("access_count")
+        .eq("id", memoryId)
+        .single();
+
+    await supabase
+        .from("memories")
+        .update({
+            access_count: ((current?.access_count as number) ?? 0) + 1,
+            last_accessed: new Date().toISOString(),
+        })
+        .eq("id", memoryId);
 }
 
 // ─── Memory decay ────────────────────────────────────────────────────
 // Reduce relevance of memories not accessed recently.
-// Called periodically (e.g. daily via heartbeat).
-export function applyDecay(): { affected: number } {
-    // Decay memories not accessed in over 30 days
-    const result = db
-        .prepare(
-            `UPDATE memories SET relevance = MAX(0.1, relevance * 0.95)
-       WHERE last_accessed < datetime('now', '-30 days')
-       AND relevance > 0.1`
-        )
-        .run();
+export async function applyDecay(): Promise<{ affected: number }> {
+    const thirtyDaysAgo = new Date(
+        Date.now() - 30 * 24 * 60 * 60 * 1000
+    ).toISOString();
 
-    return { affected: result.changes };
+    // Fetch memories to decay
+    const { data: toDec } = await supabase
+        .from("memories")
+        .select("id, relevance")
+        .lt("last_accessed", thirtyDaysAgo)
+        .gt("relevance", 0.1);
+
+    if (!toDec || toDec.length === 0) return { affected: 0 };
+
+    let affected = 0;
+    for (const mem of toDec) {
+        const newRelevance = Math.max(0.1, (mem.relevance as number) * 0.95);
+        const { error } = await supabase
+            .from("memories")
+            .update({ relevance: newRelevance })
+            .eq("id", mem.id);
+        if (!error) affected++;
+    }
+
+    return { affected };
 }
 
 // ─── Boost recently accessed memories ────────────────────────────────
-export function boostFrequentlyAccessed(): { affected: number } {
-    const result = db
-        .prepare(
-            `UPDATE memories SET relevance = MIN(2.0, relevance * 1.05)
-       WHERE access_count > 5
-       AND last_accessed > datetime('now', '-7 days')
-       AND relevance < 2.0`
-        )
-        .run();
+export async function boostFrequentlyAccessed(): Promise<{ affected: number }> {
+    const sevenDaysAgo = new Date(
+        Date.now() - 7 * 24 * 60 * 60 * 1000
+    ).toISOString();
 
-    return { affected: result.changes };
+    const { data: toBoost } = await supabase
+        .from("memories")
+        .select("id, relevance")
+        .gt("access_count", 5)
+        .gt("last_accessed", sevenDaysAgo)
+        .lt("relevance", 2.0);
+
+    if (!toBoost || toBoost.length === 0) return { affected: 0 };
+
+    let affected = 0;
+    for (const mem of toBoost) {
+        const newRelevance = Math.min(2.0, (mem.relevance as number) * 1.05);
+        const { error } = await supabase
+            .from("memories")
+            .update({ relevance: newRelevance })
+            .eq("id", mem.id);
+        if (!error) affected++;
+    }
+
+    return { affected };
 }
 
-// ─── Merge duplicate memories ────────────────────────────────────────
-export function findDuplicates(): Array<{
-    id1: number;
-    id2: number;
-    content1: string;
-    content2: string;
-    similarity: number;
-}> {
-    // Find memories with very similar content (simple word overlap check)
-    const memories = db
-        .prepare("SELECT id, content FROM memories ORDER BY id")
-        .all() as Array<{ id: number; content: string }>;
+// ─── Find duplicate memories ─────────────────────────────────────────
+export async function findDuplicates(): Promise<
+    Array<{
+        id1: number;
+        id2: number;
+        content1: string;
+        content2: string;
+        similarity: number;
+    }>
+> {
+    const { data: memories } = await supabase
+        .from("memories")
+        .select("id, content")
+        .order("id");
+
+    if (!memories) return [];
 
     const duplicates: Array<{
         id1: number;
@@ -79,13 +102,16 @@ export function findDuplicates(): Array<{
 
     for (let i = 0; i < memories.length; i++) {
         for (let j = i + 1; j < memories.length; j++) {
-            const sim = wordOverlap(memories[i]!.content, memories[j]!.content);
+            const sim = wordOverlap(
+                memories[i]!.content as string,
+                memories[j]!.content as string
+            );
             if (sim > 0.7) {
                 duplicates.push({
-                    id1: memories[i]!.id,
-                    id2: memories[j]!.id,
-                    content1: memories[i]!.content,
-                    content2: memories[j]!.content,
+                    id1: memories[i]!.id as number,
+                    id2: memories[j]!.id as number,
+                    content1: memories[i]!.content as string,
+                    content2: memories[j]!.content as string,
                     similarity: Math.round(sim * 100) / 100,
                 });
             }
@@ -104,14 +130,14 @@ function wordOverlap(a: string, b: string): number {
 }
 
 // ─── Run full maintenance cycle ──────────────────────────────────────
-export function runMaintenance(): {
+export async function runMaintenance(): Promise<{
     decay: { affected: number };
     boost: { affected: number };
     duplicates: number;
-} {
-    const decay = applyDecay();
-    const boost = boostFrequentlyAccessed();
-    const duplicates = findDuplicates();
+}> {
+    const decay = await applyDecay();
+    const boost = await boostFrequentlyAccessed();
+    const duplicates = await findDuplicates();
 
     console.log(
         `🧹 Memory maintenance: decayed ${decay.affected}, boosted ${boost.affected}, found ${duplicates.length} potential duplicates`

@@ -1,5 +1,5 @@
 import { registerTool } from "./index.js";
-import { db } from "../db.js";
+import { supabase } from "../supabase.js";
 
 // ─── Tool: remember ──────────────────────────────────────────────────
 registerTool({
@@ -25,13 +25,19 @@ registerTool({
         const content = input.content as string;
         const category = (input.category as string) || "general";
 
-        const result = db
-            .prepare("INSERT INTO memories (content, category) VALUES (?, ?)")
-            .run(content, category);
+        const { data, error } = await supabase
+            .from("memories")
+            .insert({ content, category })
+            .select("id")
+            .single();
+
+        if (error) {
+            return JSON.stringify({ error: `Failed to save memory: ${error.message}` });
+        }
 
         return JSON.stringify({
             success: true,
-            id: result.lastInsertRowid,
+            id: data.id,
             message: `Remembered: "${content}" [${category}]`,
         });
     },
@@ -41,7 +47,7 @@ registerTool({
 registerTool({
     name: "search_memory",
     description:
-        "Search through saved memories using full-text search. Use this to recall facts about the user, their preferences, past conversations, or any stored information.",
+        "Search through saved memories using text search. Use this to recall facts about the user, their preferences, past conversations, or any stored information.",
     inputSchema: {
         type: "object" as const,
         properties: {
@@ -65,71 +71,29 @@ registerTool({
         const category = input.category as string | undefined;
         const limit = (input.limit as number) || 10;
 
-        // FTS5 query — add * for prefix matching
-        const ftsQuery = query
-            .split(/\s+/)
-            .map((word) => `"${word}"*`)
-            .join(" OR ");
-
-        let sql: string;
-        let params: unknown[];
+        // Use Postgres text search with ilike as fallback
+        let q = supabase
+            .from("memories")
+            .select("id, content, category, created_at")
+            .ilike("content", `%${query}%`)
+            .order("created_at", { ascending: false })
+            .limit(limit);
 
         if (category) {
-            sql = `
-        SELECT m.id, m.content, m.category, m.created_at,
-               rank
-        FROM memories_fts fts
-        JOIN memories m ON m.id = fts.rowid
-        WHERE memories_fts MATCH ? AND m.category = ?
-        ORDER BY rank
-        LIMIT ?
-      `;
-            params = [ftsQuery, category, limit];
-        } else {
-            sql = `
-        SELECT m.id, m.content, m.category, m.created_at,
-               rank
-        FROM memories_fts fts
-        JOIN memories m ON m.id = fts.rowid
-        WHERE memories_fts MATCH ?
-        ORDER BY rank
-        LIMIT ?
-      `;
-            params = [ftsQuery, limit];
+            q = q.eq("category", category);
         }
 
-        try {
-            const results = db.prepare(sql).all(...params) as Array<{
-                id: number;
-                content: string;
-                category: string;
-                created_at: string;
-            }>;
+        const { data: results, error } = await q;
 
-            return JSON.stringify({
-                query,
-                results,
-                count: results.length,
-            });
-        } catch {
-            // Fallback to LIKE search if FTS query fails
-            const likeResults = db
-                .prepare(
-                    "SELECT id, content, category, created_at FROM memories WHERE content LIKE ? LIMIT ?"
-                )
-                .all(`%${query}%`, limit) as Array<{
-                    id: number;
-                    content: string;
-                    category: string;
-                    created_at: string;
-                }>;
-
-            return JSON.stringify({
-                query,
-                results: likeResults,
-                count: likeResults.length,
-            });
+        if (error) {
+            return JSON.stringify({ error: `Search failed: ${error.message}` });
         }
+
+        return JSON.stringify({
+            query,
+            results: results ?? [],
+            count: results?.length ?? 0,
+        });
     },
 });
 
@@ -156,22 +120,22 @@ registerTool({
         const category = input.category as string | undefined;
         const limit = (input.limit as number) || 20;
 
-        let results;
+        let q = supabase
+            .from("memories")
+            .select("id, content, category, created_at")
+            .order("created_at", { ascending: false })
+            .limit(limit);
+
         if (category) {
-            results = db
-                .prepare(
-                    "SELECT id, content, category, created_at FROM memories WHERE category = ? ORDER BY created_at DESC LIMIT ?"
-                )
-                .all(category, limit);
-        } else {
-            results = db
-                .prepare(
-                    "SELECT id, content, category, created_at FROM memories ORDER BY created_at DESC LIMIT ?"
-                )
-                .all(limit);
+            q = q.eq("category", category);
         }
 
-        return JSON.stringify({ memories: results, count: (results as unknown[]).length });
+        const { data: results } = await q;
+
+        return JSON.stringify({
+            memories: results ?? [],
+            count: results?.length ?? 0,
+        });
     },
 });
 
@@ -193,11 +157,12 @@ registerTool({
     async execute(input: Record<string, unknown>): Promise<string> {
         const id = input.id as number;
 
-        const result = db
-            .prepare("DELETE FROM memories WHERE id = ?")
-            .run(id);
+        const { error, count } = await supabase
+            .from("memories")
+            .delete({ count: "exact" })
+            .eq("id", id);
 
-        if (result.changes === 0) {
+        if (error || count === 0) {
             return JSON.stringify({ error: `No memory found with ID ${id}.` });
         }
 

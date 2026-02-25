@@ -1,22 +1,9 @@
 import { registerTool } from "./index.js";
-import { db } from "../db.js";
+import { supabase } from "../supabase.js";
 import cron from "node-cron";
 import { runAgent } from "../agent.js";
 import { bot } from "../bot.js";
 import { config } from "../config.js";
-
-// ─── Schema for scheduled tasks ──────────────────────────────────────
-db.exec(`
-  CREATE TABLE IF NOT EXISTS scheduled_tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    cron TEXT NOT NULL,
-    prompt TEXT NOT NULL,
-    enabled INTEGER DEFAULT 1,
-    last_run TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-`);
 
 // ─── Active task jobs ────────────────────────────────────────────────
 const activeTaskJobs = new Map<number, cron.ScheduledTask>();
@@ -52,9 +39,10 @@ function startTaskJob(
             try {
                 const result = await runAgent(prompt);
                 await sendToUser(`⏰ **Scheduled: ${name}**\n\n${result}`);
-                db.prepare(
-                    "UPDATE scheduled_tasks SET last_run = datetime('now') WHERE id = ?"
-                ).run(id);
+                await supabase
+                    .from("scheduled_tasks")
+                    .update({ last_run: new Date().toISOString() })
+                    .eq("id", id);
             } catch (err) {
                 console.error(`❌ Scheduled task "${name}" failed:`, err);
             }
@@ -65,17 +53,25 @@ function startTaskJob(
     activeTaskJobs.set(id, job);
 }
 
-// ─── Resume existing tasks on startup ────────────────────────────────
-const existingTasks = db
-    .prepare("SELECT id, name, cron, prompt FROM scheduled_tasks WHERE enabled = 1")
-    .all() as Array<{ id: number; name: string; cron: string; prompt: string }>;
+// ─── Resume existing tasks on startup (async IIFE) ───────────────────
+(async () => {
+    const { data: existingTasks } = await supabase
+        .from("scheduled_tasks")
+        .select("id, name, cron, prompt")
+        .eq("enabled", true);
 
-for (const task of existingTasks) {
-    if (cron.validate(task.cron)) {
-        startTaskJob(task.id, task.name, task.cron, task.prompt);
-        console.log(`  📋 Resumed task: ${task.name} (${task.cron})`);
+    for (const task of existingTasks ?? []) {
+        if (cron.validate(task.cron as string)) {
+            startTaskJob(
+                task.id as number,
+                task.name as string,
+                task.cron as string,
+                task.prompt as string
+            );
+            console.log(`  📋 Resumed task: ${task.name} (${task.cron})`);
+        }
     }
-}
+})();
 
 // ─── Tool: schedule_task ─────────────────────────────────────────────
 registerTool({
@@ -109,13 +105,17 @@ registerTool({
             });
         }
 
-        const result = db
-            .prepare(
-                "INSERT INTO scheduled_tasks (name, cron, prompt) VALUES (?, ?, ?)"
-            )
-            .run(name, cronExpr, prompt);
+        const { data, error } = await supabase
+            .from("scheduled_tasks")
+            .insert({ name, cron: cronExpr, prompt })
+            .select("id")
+            .single();
 
-        const id = result.lastInsertRowid as number;
+        if (error) {
+            return JSON.stringify({ error: `Failed to schedule task: ${error.message}` });
+        }
+
+        const id = data.id as number;
         startTaskJob(id, name, cronExpr, prompt);
 
         return JSON.stringify({
@@ -136,13 +136,12 @@ registerTool({
         required: [],
     },
     async execute(): Promise<string> {
-        const tasks = db
-            .prepare(
-                "SELECT id, name, cron, prompt, enabled, last_run, created_at FROM scheduled_tasks ORDER BY created_at"
-            )
-            .all();
+        const { data: tasks } = await supabase
+            .from("scheduled_tasks")
+            .select("id, name, cron, prompt, enabled, last_run, created_at")
+            .order("created_at");
 
-        return JSON.stringify({ tasks, count: (tasks as unknown[]).length });
+        return JSON.stringify({ tasks: tasks ?? [], count: tasks?.length ?? 0 });
     },
 });
 
@@ -160,7 +159,10 @@ registerTool({
     async execute(input: Record<string, unknown>): Promise<string> {
         const id = input.id as number;
 
-        db.prepare("UPDATE scheduled_tasks SET enabled = 0 WHERE id = ?").run(id);
+        await supabase
+            .from("scheduled_tasks")
+            .update({ enabled: false })
+            .eq("id", id);
 
         const job = activeTaskJobs.get(id);
         if (job) {
@@ -192,7 +194,7 @@ registerTool({
             activeTaskJobs.delete(id);
         }
 
-        db.prepare("DELETE FROM scheduled_tasks WHERE id = ?").run(id);
+        await supabase.from("scheduled_tasks").delete().eq("id", id);
         return JSON.stringify({ success: true, message: `Task #${id} deleted.` });
     },
 });

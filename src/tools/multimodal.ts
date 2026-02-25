@@ -1,5 +1,5 @@
 import { registerTool } from "./index.js";
-import { db } from "../db.js";
+import { supabase } from "../supabase.js";
 
 // ─── Multimodal Memory Tools ────────────────────────────────────────
 // Process images, audio, and documents → extract info → store as memories.
@@ -32,9 +32,13 @@ registerTool({
             ? `[Image] ${description} — Context: ${context}`
             : `[Image] ${description}`;
 
-        db.prepare("INSERT INTO memories (content, category) VALUES (?, 'visual')").run(
-            memoryContent
-        );
+        const { error } = await supabase
+            .from("memories")
+            .insert({ content: memoryContent, category: "visual" });
+
+        if (error) {
+            return JSON.stringify({ error: `Failed to store image memory: ${error.message}` });
+        }
 
         return JSON.stringify({
             success: true,
@@ -66,9 +70,13 @@ registerTool({
         const transcription = input.transcription as string;
         const source = (input.source as string) || "voice_message";
 
-        db.prepare(
-            "INSERT INTO memories (content, category) VALUES (?, 'audio')"
-        ).run(`[Audio/${source}] ${transcription}`);
+        const { error } = await supabase
+            .from("memories")
+            .insert({ content: `[Audio/${source}] ${transcription}`, category: "audio" });
+
+        if (error) {
+            return JSON.stringify({ error: `Failed to store audio memory: ${error.message}` });
+        }
 
         return JSON.stringify({
             success: true,
@@ -106,9 +114,13 @@ registerTool({
             ? `[Document: ${filename}] ${summary}\n\nKey content: ${content.slice(0, 1000)}`
             : `[Document: ${filename}] ${content.slice(0, 2000)}`;
 
-        db.prepare(
-            "INSERT INTO memories (content, category) VALUES (?, 'document')"
-        ).run(memoryContent);
+        const { error } = await supabase
+            .from("memories")
+            .insert({ content: memoryContent, category: "document" });
+
+        if (error) {
+            return JSON.stringify({ error: `Failed to store document: ${error.message}` });
+        }
 
         return JSON.stringify({
             success: true,
@@ -138,24 +150,25 @@ registerTool({
         const query = input.query as string;
         const mediaType = (input.media_type as string) || "all";
 
-        let sql: string;
-        let params: unknown[];
+        let q = supabase
+            .from("memories")
+            .select("id, content, category, created_at")
+            .ilike("content", `%${query}%`)
+            .order("created_at", { ascending: false })
+            .limit(10);
 
         if (mediaType === "all") {
-            sql =
-                "SELECT id, content, category, created_at FROM memories WHERE category IN ('visual','audio','document') AND content LIKE ? ORDER BY created_at DESC LIMIT 10";
-            params = [`%${query}%`];
+            q = q.in("category", ["visual", "audio", "document"]);
         } else {
-            sql =
-                "SELECT id, content, category, created_at FROM memories WHERE category = ? AND content LIKE ? ORDER BY created_at DESC LIMIT 10";
-            params = [mediaType, `%${query}%`];
+            q = q.eq("category", mediaType);
         }
 
-        const results = db.prepare(sql).all(...params);
+        const { data: results } = await q;
+
         return JSON.stringify({
             query,
-            results,
-            count: (results as unknown[]).length,
+            results: results ?? [],
+            count: results?.length ?? 0,
         });
     },
 });

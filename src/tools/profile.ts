@@ -1,5 +1,5 @@
 import { registerTool } from "./index.js";
-import { db } from "../db.js";
+import { supabase } from "../supabase.js";
 
 // ─── Tool: set_profile ───────────────────────────────────────────────
 registerTool({
@@ -25,10 +25,16 @@ registerTool({
         const key = (input.key as string).toLowerCase().trim();
         const value = input.value as string;
 
-        db.prepare(
-            `INSERT INTO profile (key, value, updated_at) VALUES (?, ?, datetime('now'))
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
-        ).run(key, value);
+        const { error } = await supabase
+            .from("profile")
+            .upsert(
+                { key, value, updated_at: new Date().toISOString() },
+                { onConflict: "key" }
+            );
+
+        if (error) {
+            return JSON.stringify({ error: `Profile update failed: ${error.message}` });
+        }
 
         return JSON.stringify({
             success: true,
@@ -57,9 +63,11 @@ registerTool({
         const key = input.key as string | undefined;
 
         if (key) {
-            const row = db
-                .prepare("SELECT key, value, updated_at FROM profile WHERE key = ?")
-                .get(key) as { key: string; value: string; updated_at: string } | undefined;
+            const { data: row } = await supabase
+                .from("profile")
+                .select("key, value, updated_at")
+                .eq("key", key)
+                .maybeSingle();
 
             if (!row) {
                 return JSON.stringify({ error: `No profile fact found for "${key}".` });
@@ -67,11 +75,12 @@ registerTool({
             return JSON.stringify({ profile: row });
         }
 
-        const rows = db
-            .prepare("SELECT key, value, updated_at FROM profile ORDER BY key")
-            .all() as Array<{ key: string; value: string; updated_at: string }>;
+        const { data: rows } = await supabase
+            .from("profile")
+            .select("key, value, updated_at")
+            .order("key");
 
-        if (rows.length === 0) {
+        if (!rows || rows.length === 0) {
             return JSON.stringify({
                 profile: {},
                 message:
@@ -79,10 +88,9 @@ registerTool({
             });
         }
 
-        // Convert to a clean object
         const profile: Record<string, string> = {};
         for (const row of rows) {
-            profile[row.key] = row.value;
+            profile[row.key as string] = row.value as string;
         }
 
         return JSON.stringify({ profile });

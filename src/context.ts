@@ -1,9 +1,8 @@
 import { encoding_for_model } from "tiktoken";
 import { chat, type Message } from "./llm.js";
-import { db } from "./db.js";
+import { supabase } from "./supabase.js";
 
 // ─── Token counting ─────────────────────────────────────────────────
-// Claude uses cl100k_base tokenizer (same as GPT-4)
 let encoder: ReturnType<typeof encoding_for_model> | null = null;
 
 function getEncoder() {
@@ -21,15 +20,14 @@ function messageTokens(msg: Message): number {
     if (typeof msg.content === "string") {
         return countTokens(msg.content) + 4; // role overhead
     }
-    // For arrays (tool results, content blocks), estimate from JSON
     return countTokens(JSON.stringify(msg.content)) + 4;
 }
 
 // ─── Context Manager ─────────────────────────────────────────────────
 
-const MAX_CONTEXT_TOKENS = 150_000; // Claude Sonnet context = 200K, leave headroom
-const PRUNE_THRESHOLD = 0.8; // Prune when at 80% of max
-const SUMMARY_TARGET_TOKENS = 500; // Target size for summaries
+const MAX_CONTEXT_TOKENS = 150_000;
+const PRUNE_THRESHOLD = 0.8;
+const SUMMARY_TARGET_TOKENS = 500;
 
 interface ConversationEntry {
     role: "user" | "assistant";
@@ -40,20 +38,32 @@ interface ConversationEntry {
 export class ContextManager {
     private history: ConversationEntry[] = [];
 
-    constructor() {
-        // Load recent conversation history from DB
-        const recent = db
-            .prepare(
-                "SELECT role, content, created_at FROM conversation_log ORDER BY id DESC LIMIT 50"
-            )
-            .all() as Array<{ role: string; content: string; created_at: string }>;
+    private constructor() { }
 
-        this.history = recent
+    static async create(): Promise<ContextManager> {
+        const mgr = new ContextManager();
+        await mgr.loadHistory();
+        return mgr;
+    }
+
+    private async loadHistory(): Promise<void> {
+        const { data, error } = await supabase
+            .from("conversation_log")
+            .select("role, content, created_at")
+            .order("id", { ascending: false })
+            .limit(50);
+
+        if (error) {
+            console.error("⚠️ Failed to load conversation history:", error.message);
+            return;
+        }
+
+        this.history = (data ?? [])
             .reverse()
-            .map((r) => ({
+            .map((r: any) => ({
                 role: r.role as "user" | "assistant",
-                content: r.content,
-                timestamp: new Date(r.created_at).getTime(),
+                content: r.content as string,
+                timestamp: new Date(r.created_at as string).getTime(),
             }));
     }
 
@@ -82,14 +92,12 @@ export class ContextManager {
     async prune(): Promise<string | null> {
         if (!this.needsPruning()) return null;
 
-        // Take the first half of messages for summarization
         const midpoint = Math.floor(this.history.length / 2);
         if (midpoint < 2) return null;
 
         const toSummarize = this.history.slice(0, midpoint);
         const toKeep = this.history.slice(midpoint);
 
-        // Summarize via LLM
         const conversationText = toSummarize
             .map((h) => `${h.role}: ${h.content}`)
             .join("\n\n");
@@ -107,7 +115,6 @@ export class ContextManager {
             .map((b) => ("text" in b ? b.text : ""))
             .join("\n");
 
-        // Replace old messages with summary
         this.history = [
             {
                 role: "assistant" as const,
@@ -118,9 +125,9 @@ export class ContextManager {
         ];
 
         // Store summary in DB
-        db.prepare(
-            "INSERT INTO conversation_log (role, content) VALUES ('summary', ?)"
-        ).run(summaryText);
+        await supabase
+            .from("conversation_log")
+            .insert({ role: "summary", content: summaryText });
 
         const oldTokens = toSummarize.reduce(
             (s, h) => s + countTokens(h.content),
@@ -135,7 +142,6 @@ export class ContextManager {
     }
 
     async compact(): Promise<string> {
-        // Force prune regardless of threshold
         const originalCount = this.history.length;
         const originalTokens = this.getTotalTokens();
 
@@ -143,7 +149,6 @@ export class ContextManager {
             return "Not enough conversation history to compact.";
         }
 
-        // Summarize all but last 4 messages
         const keepCount = 4;
         const toSummarize = this.history.slice(0, -keepCount);
         const toKeep = this.history.slice(-keepCount);
@@ -175,14 +180,21 @@ and context:\n\n${conversationText}`,
             ...toKeep,
         ];
 
-        db.prepare(
-            "INSERT INTO conversation_log (role, content) VALUES ('summary', ?)"
-        ).run(summaryText);
+        await supabase
+            .from("conversation_log")
+            .insert({ role: "summary", content: summaryText });
 
         const newTokens = this.getTotalTokens();
         return `Compacted: ${originalCount} messages (${originalTokens} tokens) → ${this.history.length} messages (${newTokens} tokens)`;
     }
 }
 
-// Singleton
-export const contextManager = new ContextManager();
+// Singleton — created async, exported as a promise
+let _contextManager: ContextManager | null = null;
+
+export async function getContextManager(): Promise<ContextManager> {
+    if (!_contextManager) {
+        _contextManager = await ContextManager.create();
+    }
+    return _contextManager;
+}

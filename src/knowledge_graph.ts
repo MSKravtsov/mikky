@@ -1,31 +1,6 @@
-import { db } from "./db.js";
+import { supabase } from "./supabase.js";
 
-// ─── Schema for knowledge graph ─────────────────────────────────────
-db.exec(`
-  CREATE TABLE IF NOT EXISTS entities (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    type TEXT NOT NULL,
-    properties TEXT DEFAULT '{}',
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_name_type
-    ON entities(name, type);
-
-  CREATE TABLE IF NOT EXISTS relationships (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    from_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    to_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    type TEXT NOT NULL,
-    properties TEXT DEFAULT '{}',
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_rel_from ON relationships(from_id);
-  CREATE INDEX IF NOT EXISTS idx_rel_to ON relationships(to_id);
-`);
+// ─── Schema is created via Supabase migrations ──────────────────────
 
 // ─── Graph operations ────────────────────────────────────────────────
 
@@ -35,6 +10,7 @@ export interface Entity {
     type: string;
     properties: Record<string, unknown>;
     created_at: string;
+    updated_at?: string;
 }
 
 export interface Relationship {
@@ -46,111 +22,117 @@ export interface Relationship {
     created_at: string;
 }
 
-export function addEntity(
+export async function addEntity(
     name: string,
     type: string,
     properties: Record<string, unknown> = {}
-): Entity {
-    const result = db
-        .prepare(
-            `INSERT INTO entities (name, type, properties) VALUES (?, ?, ?)
-       ON CONFLICT(name, type) DO UPDATE SET
-         properties = excluded.properties,
-         updated_at = datetime('now')`
+): Promise<Entity> {
+    const { data, error } = await supabase
+        .from("entities")
+        .upsert(
+            { name, type, properties, updated_at: new Date().toISOString() },
+            { onConflict: "name,type" }
         )
-        .run(name, type, JSON.stringify(properties));
+        .select()
+        .single();
 
-    return db
-        .prepare("SELECT * FROM entities WHERE id = ?")
-        .get(result.lastInsertRowid) as Entity;
+    if (error) throw new Error(`addEntity failed: ${error.message}`);
+    return data as Entity;
 }
 
-export function addRelationship(
+export async function addRelationship(
     fromId: number,
     toId: number,
     type: string,
     properties: Record<string, unknown> = {}
-): Relationship {
-    const result = db
-        .prepare(
-            "INSERT INTO relationships (from_id, to_id, type, properties) VALUES (?, ?, ?, ?)"
-        )
-        .run(fromId, toId, type, JSON.stringify(properties));
+): Promise<Relationship> {
+    const { data, error } = await supabase
+        .from("relationships")
+        .insert({ from_id: fromId, to_id: toId, type, properties })
+        .select()
+        .single();
 
-    return db
-        .prepare("SELECT * FROM relationships WHERE id = ?")
-        .get(result.lastInsertRowid) as Relationship;
+    if (error) throw new Error(`addRelationship failed: ${error.message}`);
+    return data as Relationship;
 }
 
-export function findEntity(name: string, type?: string): Entity | undefined {
-    if (type) {
-        return db
-            .prepare("SELECT * FROM entities WHERE name = ? AND type = ?")
-            .get(name, type) as Entity | undefined;
-    }
-    return db
-        .prepare("SELECT * FROM entities WHERE name = ?")
-        .get(name) as Entity | undefined;
+export async function findEntity(
+    name: string,
+    type?: string
+): Promise<Entity | undefined> {
+    let query = supabase.from("entities").select("*").eq("name", name);
+    if (type) query = query.eq("type", type);
+
+    const { data, error } = await query.limit(1).maybeSingle();
+    if (error) throw new Error(`findEntity failed: ${error.message}`);
+    return (data as Entity) ?? undefined;
 }
 
-export function getConnections(
+export async function getConnections(
     entityId: number
-): Array<{ relationship: string; direction: string; entity: Entity }> {
-    const outgoing = db
-        .prepare(
-            `SELECT r.type as rel_type, e.* FROM relationships r
-       JOIN entities e ON e.id = r.to_id
-       WHERE r.from_id = ?`
-        )
-        .all(entityId) as Array<{ rel_type: string } & Entity>;
+): Promise<Array<{ relationship: string; direction: string; entity: Entity }>> {
+    // Outgoing
+    const { data: outgoing, error: e1 } = await supabase
+        .from("relationships")
+        .select("type, entities!relationships_to_id_fkey(*)")
+        .eq("from_id", entityId);
 
-    const incoming = db
-        .prepare(
-            `SELECT r.type as rel_type, e.* FROM relationships r
-       JOIN entities e ON e.id = r.from_id
-       WHERE r.to_id = ?`
-        )
-        .all(entityId) as Array<{ rel_type: string } & Entity>;
+    if (e1) throw new Error(`getConnections outgoing failed: ${e1.message}`);
 
-    return [
-        ...outgoing.map((r) => ({
-            relationship: r.rel_type,
-            direction: "outgoing",
-            entity: { id: r.id, name: r.name, type: r.type, properties: JSON.parse(r.properties as unknown as string), created_at: r.created_at },
-        })),
-        ...incoming.map((r) => ({
-            relationship: r.rel_type,
-            direction: "incoming",
-            entity: { id: r.id, name: r.name, type: r.type, properties: JSON.parse(r.properties as unknown as string), created_at: r.created_at },
-        })),
-    ];
+    // Incoming
+    const { data: incoming, error: e2 } = await supabase
+        .from("relationships")
+        .select("type, entities!relationships_from_id_fkey(*)")
+        .eq("to_id", entityId);
+
+    if (e2) throw new Error(`getConnections incoming failed: ${e2.message}`);
+
+    const results: Array<{ relationship: string; direction: string; entity: Entity }> = [];
+
+    for (const row of outgoing ?? []) {
+        const entity = (row as any).entities as Entity;
+        if (entity) {
+            results.push({ relationship: row.type, direction: "outgoing", entity });
+        }
+    }
+
+    for (const row of incoming ?? []) {
+        const entity = (row as any).entities as Entity;
+        if (entity) {
+            results.push({ relationship: row.type, direction: "incoming", entity });
+        }
+    }
+
+    return results;
 }
 
-export function traverseGraph(
+export async function traverseGraph(
     startId: number,
     maxDepth: number = 3
-): Array<{ depth: number; entity: Entity; via: string }> {
+): Promise<Array<{ depth: number; entity: Entity; via: string }>> {
     const visited = new Set<number>();
     const results: Array<{ depth: number; entity: Entity; via: string }> = [];
 
-    function dfs(entityId: number, depth: number, via: string) {
+    async function dfs(entityId: number, depth: number, via: string) {
         if (depth > maxDepth || visited.has(entityId)) return;
         visited.add(entityId);
 
-        const entity = db
-            .prepare("SELECT * FROM entities WHERE id = ?")
-            .get(entityId) as Entity | undefined;
+        const { data: entity } = await supabase
+            .from("entities")
+            .select("*")
+            .eq("id", entityId)
+            .maybeSingle();
 
         if (entity) {
-            results.push({ depth, entity, via });
-            const connections = getConnections(entityId);
+            results.push({ depth, entity: entity as Entity, via });
+            const connections = await getConnections(entityId);
             for (const conn of connections) {
-                dfs(conn.entity.id, depth + 1, conn.relationship);
+                await dfs(conn.entity.id, depth + 1, conn.relationship);
             }
         }
     }
 
-    dfs(startId, 0, "start");
+    await dfs(startId, 0, "start");
     return results;
 }
 

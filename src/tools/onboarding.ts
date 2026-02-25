@@ -1,9 +1,7 @@
 import { registerTool } from "./index.js";
-import { db } from "../db.js";
+import { supabase } from "../supabase.js";
 
 // ─── Onboarding questionnaire (inspired by Mem, Notion AI, Reflect) ──
-// Structured in sections, asked conversationally one at a time.
-
 const ONBOARDING_SECTIONS = [
     {
         section: "Identity",
@@ -117,14 +115,12 @@ registerTool({
         required: [],
     },
     async execute(): Promise<string> {
-        // Check which profile keys are already filled
-        const existingKeys = db
-            .prepare("SELECT key FROM profile")
-            .all() as Array<{ key: string }>;
+        const { data: existingKeys } = await supabase
+            .from("profile")
+            .select("key");
 
-        const filledKeys = new Set(existingKeys.map((r) => r.key));
+        const filledKeys = new Set((existingKeys ?? []).map((r: any) => r.key as string));
 
-        // Find remaining questions
         const remaining: Array<{
             section: string;
             key: string;
@@ -140,16 +136,18 @@ registerTool({
         }
 
         if (remaining.length === 0) {
-            // All questions answered — return full profile
-            const profile = db
-                .prepare("SELECT key, value FROM profile ORDER BY key")
-                .all() as Array<{ key: string; value: string }>;
+            const { data: profile } = await supabase
+                .from("profile")
+                .select("key, value")
+                .order("key");
 
             return JSON.stringify({
                 complete: true,
                 message:
                     "Profile is complete! All questions have been answered.",
-                profile: Object.fromEntries(profile.map((r) => [r.key, r.value])),
+                profile: Object.fromEntries(
+                    (profile ?? []).map((r: any) => [r.key, r.value])
+                ),
             });
         }
 
@@ -184,11 +182,11 @@ registerTool({
         required: [],
     },
     async execute(): Promise<string> {
-        const existingKeys = db
-            .prepare("SELECT key FROM profile")
-            .all() as Array<{ key: string }>;
+        const { data: existingKeys } = await supabase
+            .from("profile")
+            .select("key");
 
-        const filledKeys = new Set(existingKeys.map((r) => r.key));
+        const filledKeys = new Set((existingKeys ?? []).map((r: any) => r.key as string));
 
         const totalQuestions = ONBOARDING_SECTIONS.reduce(
             (sum, s) => sum + s.questions.length,

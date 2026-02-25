@@ -1,5 +1,5 @@
 import cron from "node-cron";
-import { db } from "./db.js";
+import { supabase } from "./supabase.js";
 import { chat, type Message } from "./llm.js";
 import { bot } from "./bot.js";
 import { config } from "./config.js";
@@ -65,13 +65,13 @@ async function deliverDailyPost(): Promise<void> {
     );
 
     // Get today's confirmed topic
-    const topic = db
-        .prepare(
-            "SELECT id, topic FROM topics WHERE week_start = ? AND day_index = ? AND status = 'confirmed'"
-        )
-        .get(weekStart, todayIndex) as
-        | { id: number; topic: string }
-        | undefined;
+    const { data: topic } = await supabase
+        .from("topics")
+        .select("id, topic")
+        .eq("week_start", weekStart)
+        .eq("day_index", todayIndex)
+        .eq("status", "confirmed")
+        .maybeSingle();
 
     if (!topic) {
         console.log("   No confirmed topic for today — skipping.");
@@ -79,24 +79,32 @@ async function deliverDailyPost(): Promise<void> {
     }
 
     // Get template (prefer "default", fall back to any)
-    const template = (db
-        .prepare("SELECT id, name, content FROM templates WHERE name = 'default'")
-        .get() ||
-        db
-            .prepare(
-                "SELECT id, name, content FROM templates ORDER BY created_at DESC LIMIT 1"
-            )
-            .get()) as { id: number; name: string; content: string } | undefined;
+    let { data: template } = await supabase
+        .from("templates")
+        .select("id, name, content")
+        .eq("name", "default")
+        .maybeSingle();
+
+    if (!template) {
+        const { data: fallback } = await supabase
+            .from("templates")
+            .select("id, name, content")
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+        template = fallback;
+    }
 
     // Load user profile for personalization
-    const profileRows = db
-        .prepare("SELECT key, value FROM profile ORDER BY key")
-        .all() as Array<{ key: string; value: string }>;
+    const { data: profileRows } = await supabase
+        .from("profile")
+        .select("key, value")
+        .order("key");
 
     let profileContext = "";
-    if (profileRows.length > 0) {
+    if (profileRows && profileRows.length > 0) {
         profileContext = "\n\nAuthor profile:\n" +
-            profileRows.map((r) => `- ${r.key}: ${r.value}`).join("\n") +
+            profileRows.map((r: any) => `- ${r.key}: ${r.value}`).join("\n") +
             "\n\nWrite in a voice that matches this person's expertise and style.";
     }
 
@@ -106,7 +114,7 @@ async function deliverDailyPost(): Promise<void> {
         : `Write a professional LinkedIn post. Include a hook, main body, call-to-action, and relevant hashtags.`;
 
     // Search for trending content related to the topic
-    const trendingContext = await fetchTrendingContext(topic.topic);
+    const trendingContext = await fetchTrendingContext(topic.topic as string);
 
     const messages: Message[] = [
         {
@@ -131,14 +139,18 @@ async function deliverDailyPost(): Promise<void> {
         }
 
         // Save the generated post
-        db.prepare(
-            "INSERT INTO posts (topic_id, template_id, content, delivered) VALUES (?, ?, ?, 1)"
-        ).run(topic.id, template?.id ?? null, postContent);
+        await supabase.from("posts").insert({
+            topic_id: topic.id,
+            template_id: template?.id ?? null,
+            content: postContent,
+            delivered: true,
+        });
 
         // Mark topic as posted
-        db.prepare(
-            "UPDATE topics SET status = 'posted', updated_at = datetime('now') WHERE id = ?"
-        ).run(topic.id);
+        await supabase
+            .from("topics")
+            .update({ status: "posted", updated_at: new Date().toISOString() })
+            .eq("id", topic.id);
 
         // Send to user via Telegram
         const header = `📝 **LinkedIn Post — ${DAY_NAMES[todayIndex]}**\n_Topic: ${topic.topic}_\n\n---\n\n`;
@@ -151,7 +163,6 @@ async function deliverDailyPost(): Promise<void> {
                         parse_mode: "Markdown",
                     });
                 } else {
-                    // Split long posts
                     await bot.api.sendMessage(userId, header, {
                         parse_mode: "Markdown",
                     });

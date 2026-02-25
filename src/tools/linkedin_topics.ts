@@ -1,11 +1,11 @@
 import { registerTool } from "./index.js";
-import { db } from "../db.js";
+import { supabase } from "../supabase.js";
 
 // ─── Helper: get Monday of the current or next week ──────────────────
 function getWeekStart(nextWeek = false): string {
     const now = new Date();
-    const day = now.getDay(); // 0=Sun, 1=Mon, ...
-    const diff = day === 0 ? -6 : 1 - day; // distance to Monday
+    const day = now.getDay();
+    const diff = day === 0 ? -6 : 1 - day;
     const monday = new Date(now);
     monday.setDate(now.getDate() + diff + (nextWeek ? 7 : 0));
     return monday.toISOString().split("T")[0]!;
@@ -53,21 +53,25 @@ registerTool({
         }
 
         // Clear existing drafts for this week
-        db.prepare("DELETE FROM topics WHERE week_start = ? AND status = 'draft'").run(
-            weekStart
-        );
+        await supabase
+            .from("topics")
+            .delete()
+            .eq("week_start", weekStart)
+            .eq("status", "draft");
 
-        const insert = db.prepare(
-            "INSERT INTO topics (week_start, day_index, topic, status) VALUES (?, ?, ?, 'draft')"
-        );
+        // Insert new drafts
+        const rows = topics.map((topic, i) => ({
+            week_start: weekStart,
+            day_index: i,
+            topic,
+            status: "draft",
+        }));
 
-        const insertMany = db.transaction((items: string[]) => {
-            for (let i = 0; i < items.length; i++) {
-                insert.run(weekStart, i, items[i]);
-            }
-        });
+        const { error } = await supabase.from("topics").insert(rows);
 
-        insertMany(topics);
+        if (error) {
+            return JSON.stringify({ error: `Failed to save topics: ${error.message}` });
+        }
 
         const summary = topics
             .map((t, i) => `${i + 1}. ${DAY_NAMES[i]}: ${t}`)
@@ -116,13 +120,14 @@ registerTool({
             return JSON.stringify({ error: "day_index must be 0-6." });
         }
 
-        const result = db
-            .prepare(
-                "UPDATE topics SET topic = ?, updated_at = datetime('now') WHERE week_start = ? AND day_index = ? AND status = 'draft'"
-            )
-            .run(newTopic, weekStart, dayIndex);
+        const { count, error } = await supabase
+            .from("topics")
+            .update({ topic: newTopic, updated_at: new Date().toISOString() })
+            .eq("week_start", weekStart)
+            .eq("day_index", dayIndex)
+            .eq("status", "draft");
 
-        if (result.changes === 0) {
+        if (error || !count) {
             return JSON.stringify({
                 error: `No draft topic found for ${DAY_NAMES[dayIndex]} (week ${weekStart}). Generate topics first.`,
             });
@@ -156,28 +161,26 @@ registerTool({
     async execute(input: Record<string, unknown>): Promise<string> {
         const weekStart = (input.week_start as string) || getWeekStart();
 
-        const drafts = db
-            .prepare(
-                "SELECT id, day_index, topic FROM topics WHERE week_start = ? AND status = 'draft'"
-            )
-            .all(weekStart) as Array<{
-                id: number;
-                day_index: number;
-                topic: string;
-            }>;
+        const { data: drafts } = await supabase
+            .from("topics")
+            .select("id, day_index, topic")
+            .eq("week_start", weekStart)
+            .eq("status", "draft");
 
-        if (drafts.length === 0) {
+        if (!drafts || drafts.length === 0) {
             return JSON.stringify({
                 error: `No draft topics found for week ${weekStart}. Generate topics first.`,
             });
         }
 
-        db.prepare(
-            "UPDATE topics SET status = 'confirmed', updated_at = datetime('now') WHERE week_start = ? AND status = 'draft'"
-        ).run(weekStart);
+        await supabase
+            .from("topics")
+            .update({ status: "confirmed", updated_at: new Date().toISOString() })
+            .eq("week_start", weekStart)
+            .eq("status", "draft");
 
         const summary = drafts
-            .map((d) => `${DAY_NAMES[d.day_index]}: ${d.topic}`)
+            .map((d: any) => `${DAY_NAMES[d.day_index]}: ${d.topic}`)
             .join("\n");
 
         return JSON.stringify({
@@ -208,17 +211,13 @@ registerTool({
     async execute(input: Record<string, unknown>): Promise<string> {
         const weekStart = (input.week_start as string) || getWeekStart();
 
-        const topics = db
-            .prepare(
-                "SELECT day_index, topic, status FROM topics WHERE week_start = ? ORDER BY day_index"
-            )
-            .all(weekStart) as Array<{
-                day_index: number;
-                topic: string;
-                status: string;
-            }>;
+        const { data: topics } = await supabase
+            .from("topics")
+            .select("day_index, topic, status")
+            .eq("week_start", weekStart)
+            .order("day_index");
 
-        if (topics.length === 0) {
+        if (!topics || topics.length === 0) {
             return JSON.stringify({
                 week_start: weekStart,
                 topics: [],
@@ -226,7 +225,7 @@ registerTool({
             });
         }
 
-        const list = topics.map((t) => ({
+        const list = topics.map((t: any) => ({
             day: DAY_NAMES[t.day_index],
             topic: t.topic,
             status: t.status,

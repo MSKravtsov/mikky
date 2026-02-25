@@ -1,8 +1,8 @@
 import { Bot } from "grammy";
 import { config } from "./config.js";
-import { db } from "./db.js";
+import { supabase } from "./supabase.js";
 import { runAgent } from "./agent.js";
-import { contextManager } from "./context.js";
+import { getContextManager } from "./context.js";
 import { transcribeVoice } from "./voice.js";
 
 export const bot = new Bot(config.telegramToken);
@@ -22,7 +22,8 @@ bot.use(async (ctx, next) => {
 // ─── /compact command ────────────────────────────────────────────────
 bot.command("compact", async (ctx) => {
     await ctx.replyWithChatAction("typing");
-    const result = await contextManager.compact();
+    const cm = await getContextManager();
+    const result = await cm.compact();
     await ctx.reply(`🗜️ ${result}`);
 });
 
@@ -44,12 +45,13 @@ bot.on("message:text", async (ctx) => {
             await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id);
         } catch { /* ignore if already deleted */ }
 
-        // Log conversation for style learning
-        const logStmt = db.prepare(
-            "INSERT INTO conversation_log (role, content) VALUES (?, ?)"
-        );
-        logStmt.run("user", userMessage);
-        logStmt.run("assistant", response);
+        // Log conversation to Supabase
+        await supabase
+            .from("conversation_log")
+            .insert([
+                { role: "user", content: userMessage },
+                { role: "assistant", content: response },
+            ]);
 
         // Telegram has a 4096 char limit per message — split if needed
         if (response.length <= 4096) {
@@ -94,7 +96,30 @@ bot.on("message:voice", async (ctx) => {
         const file = await ctx.getFile();
         const fileUrl = `https://api.telegram.org/file/bot${config.telegramToken}/${file.file_path}`;
 
-        // Transcribe via Groq Whisper
+        // Download voice data for Supabase Storage upload
+        const voiceRes = await fetch(fileUrl);
+        if (!voiceRes.ok) {
+            throw new Error(`Failed to download voice file: ${voiceRes.status}`);
+        }
+        const voiceBuffer = Buffer.from(await voiceRes.arrayBuffer());
+
+        // Upload to Supabase Storage
+        let voiceStorageUrl: string | null = null;
+        const storagePath = `voice/${Date.now()}_${ctx.from.id}.ogg`;
+        const { error: uploadErr } = await supabase.storage
+            .from("voice-messages")
+            .upload(storagePath, voiceBuffer, { contentType: "audio/ogg" });
+
+        if (!uploadErr) {
+            const { data: urlData } = supabase.storage
+                .from("voice-messages")
+                .getPublicUrl(storagePath);
+            voiceStorageUrl = urlData.publicUrl;
+        } else {
+            console.warn("⚠️ Voice upload to Supabase Storage failed:", uploadErr.message);
+        }
+
+        // Transcribe via Groq Whisper (re-use downloaded buffer)
         const transcription = await transcribeVoice(fileUrl);
         console.log(`🎙️ ${userName} [Voice]: ${transcription}`);
 
@@ -107,12 +132,16 @@ bot.on("message:voice", async (ctx) => {
             await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id);
         } catch { /* ignore if already deleted */ }
 
-        // Log conversation
-        const logStmt = db.prepare(
-            "INSERT INTO conversation_log (role, content) VALUES (?, ?)"
-        );
-        logStmt.run("user", agentInput);
-        logStmt.run("assistant", response);
+        // Log conversation to Supabase (with optional voice URL)
+        const voiceMeta = voiceStorageUrl
+            ? `\n[Voice file: ${voiceStorageUrl}]`
+            : "";
+        await supabase
+            .from("conversation_log")
+            .insert([
+                { role: "user", content: agentInput + voiceMeta },
+                { role: "assistant", content: response },
+            ]);
 
         // Send response (split if needed)
         if (response.length <= 4096) {
@@ -151,14 +180,11 @@ function splitMessage(text: string, maxLength: number): string[] {
             break;
         }
 
-        // Try to split at a newline near the limit
         let splitIndex = remaining.lastIndexOf("\n", maxLength);
         if (splitIndex === -1 || splitIndex < maxLength * 0.5) {
-            // Fall back to splitting at a space
             splitIndex = remaining.lastIndexOf(" ", maxLength);
         }
         if (splitIndex === -1 || splitIndex < maxLength * 0.5) {
-            // Hard split as last resort
             splitIndex = maxLength;
         }
 
