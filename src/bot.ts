@@ -34,10 +34,15 @@ bot.on("message:text", async (ctx) => {
     console.log(`📨 ${userName}: ${userMessage}`);
 
     try {
-        // Show "typing..." indicator while processing
-        await ctx.replyWithChatAction("typing");
+        // Show "AI thinking..." message while processing
+        const thinkingMsg = await ctx.reply("🧠 AI thinking...");
 
         const response = await runAgent(userMessage);
+
+        // Delete the thinking message
+        try {
+            await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id);
+        } catch { /* ignore if already deleted */ }
 
         // Log conversation for style learning
         const logStmt = db.prepare(
@@ -82,7 +87,8 @@ bot.on("message:voice", async (ctx) => {
     }
 
     try {
-        await ctx.replyWithChatAction("typing");
+        // Show "AI thinking..." message while processing
+        const thinkingMsg = await ctx.reply("🎙️ Listening... 🧠 AI thinking...");
 
         // Download the voice file from Telegram
         const file = await ctx.getFile();
@@ -95,6 +101,11 @@ bot.on("message:voice", async (ctx) => {
         // Run through the agent like a normal text message
         const agentInput = `[Voice message] ${transcription}`;
         const response = await runAgent(agentInput);
+
+        // Delete the thinking message
+        try {
+            await ctx.api.deleteMessage(ctx.chat.id, thinkingMsg.message_id);
+        } catch { /* ignore if already deleted */ }
 
         // Log conversation
         const logStmt = db.prepare(
