@@ -3,6 +3,32 @@ import { db } from "./db.js";
 import { chat, type Message } from "./llm.js";
 import { bot } from "./bot.js";
 import { config } from "./config.js";
+import { searchWeb, isSearchAvailable } from "./tools/web_search.js";
+
+// ─── Fetch trending context for a topic ─────────────────────────────
+async function fetchTrendingContext(topic: string): Promise<string> {
+    if (!isSearchAvailable()) return "";
+
+    console.log(`   🔍 Searching for trending content on: "${topic}"`);
+
+    try {
+        const { results } = await searchWeb(
+            `latest trends news ${topic} ${new Date().getFullYear()}`,
+            5
+        );
+
+        if (results.length === 0) return "";
+
+        const trendingInfo = results
+            .map((r, i) => `${i + 1}. ${r.title}\n   ${r.snippet.slice(0, 200)}`)
+            .join("\n");
+
+        return `\n\nRECENT TRENDING INFORMATION on this topic (use these to make the post timely and relevant):\n${trendingInfo}\n\nIncorporate 1-2 of these recent developments naturally into the post to make it current and insightful. Do NOT just list the news — weave it into your narrative.`;
+    } catch (err) {
+        console.error("   🔍 Trending search failed, writing without it.");
+        return "";
+    }
+}
 
 const DAY_NAMES = [
     "Monday",
@@ -79,10 +105,13 @@ async function deliverDailyPost(): Promise<void> {
         ? `Use this template structure:\n\n${template.content}\n\nFill in the placeholders based on the topic.`
         : `Write a professional LinkedIn post. Include a hook, main body, call-to-action, and relevant hashtags.`;
 
+    // Search for trending content related to the topic
+    const trendingContext = await fetchTrendingContext(topic.topic);
+
     const messages: Message[] = [
         {
             role: "user",
-            content: `Write a LinkedIn post about: "${topic.topic}"\n\nDay: ${DAY_NAMES[todayIndex]}${profileContext}\n\n${templateInstruction}\n\nReturn ONLY the final post text, ready to copy-paste to LinkedIn. No meta-commentary.`,
+            content: `Write a LinkedIn post about: "${topic.topic}"\n\nDay: ${DAY_NAMES[todayIndex]}${profileContext}${trendingContext}\n\n${templateInstruction}\n\nReturn ONLY the final post text, ready to copy-paste to LinkedIn. No meta-commentary.`,
         },
     ];
 
