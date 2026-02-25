@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+memory
+.DS_Store
+.git
+.gitignore
+README.md
