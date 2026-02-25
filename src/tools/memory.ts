@@ -1,6 +1,19 @@
 import { registerTool } from "./index.js";
 import { supabase } from "../supabase.js";
 
+// Escape special Postgres LIKE characters to prevent pattern injection
+function sanitizeLike(input: string): string {
+    return input.replace(/[%_\\]/g, (c) => `\\${c}`);
+}
+
+function wordOverlap(a: string, b: string): number {
+    const wordsA = new Set(a.toLowerCase().split(/\s+/));
+    const wordsB = new Set(b.toLowerCase().split(/\s+/));
+    const intersection = new Set([...wordsA].filter((w) => wordsB.has(w)));
+    const union = new Set([...wordsA, ...wordsB]);
+    return union.size === 0 ? 0 : intersection.size / union.size;
+}
+
 // ─── Tool: remember ──────────────────────────────────────────────────
 registerTool({
     name: "remember",
@@ -24,6 +37,35 @@ registerTool({
     async execute(input: Record<string, unknown>): Promise<string> {
         const content = input.content as string;
         const category = (input.category as string) || "general";
+
+        // Check for duplicates before inserting
+        const { data: existing } = await supabase
+            .from("memories")
+            .select("id, content")
+            .eq("category", category);
+
+        if (existing && existing.length > 0) {
+            for (const mem of existing) {
+                const sim = wordOverlap(content, mem.content as string);
+                if (sim > 0.7) {
+                    // Update the existing memory instead of creating a duplicate
+                    const { error } = await supabase
+                        .from("memories")
+                        .update({ content, last_accessed: new Date().toISOString() })
+                        .eq("id", mem.id);
+
+                    if (error) {
+                        return JSON.stringify({ error: `Failed to update memory: ${error.message}` });
+                    }
+
+                    return JSON.stringify({
+                        success: true,
+                        id: mem.id,
+                        message: `Updated existing memory #${mem.id} (${Math.round(sim * 100)}% similar) [${category}]`,
+                    });
+                }
+            }
+        }
 
         const { data, error } = await supabase
             .from("memories")
@@ -75,7 +117,7 @@ registerTool({
         let q = supabase
             .from("memories")
             .select("id, content, category, created_at")
-            .ilike("content", `%${query}%`)
+            .ilike("content", `%${sanitizeLike(query)}%`)
             .order("created_at", { ascending: false })
             .limit(limit);
 

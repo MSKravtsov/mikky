@@ -26,8 +26,8 @@ registerChecker({
     interval: "0 3 * * *",
     async check() {
         const result = await runMaintenance();
-        if (result.duplicates > 0) {
-            return `🧹 Memory maintenance: found ${result.duplicates} potential duplicate memories. Consider reviewing them.`;
+        if (result.duplicatesRemoved > 0) {
+            return `🧹 Memory maintenance: removed ${result.duplicatesRemoved} duplicate memories.`;
         }
         return null; // Nothing noteworthy
     },

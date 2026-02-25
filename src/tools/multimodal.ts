@@ -1,6 +1,10 @@
 import { registerTool } from "./index.js";
 import { supabase } from "../supabase.js";
 
+function sanitizeLike(input: string): string {
+    return input.replace(/[%_\\]/g, (c) => `\\${c}`);
+}
+
 // ─── Multimodal Memory Tools ────────────────────────────────────────
 // Process images, audio, and documents → extract info → store as memories.
 
@@ -153,7 +157,7 @@ registerTool({
         let q = supabase
             .from("memories")
             .select("id, content, category, created_at")
-            .ilike("content", `%${query}%`)
+            .ilike("content", `%${sanitizeLike(query)}%`)
             .order("created_at", { ascending: false })
             .limit(10);
 

@@ -81,10 +81,7 @@ bot.on("message:voice", async (ctx) => {
 
     // Check if Groq key is configured
     if (!config.groqApiKey) {
-        await ctx.reply(
-            "🎙️ Voice messages aren't configured yet.\n" +
-            "Add your GROQ_API_KEY to .env to enable transcription."
-        );
+        await ctx.reply("🎙️ Voice messages aren't configured yet.");
         return;
     }
 
@@ -105,7 +102,7 @@ bot.on("message:voice", async (ctx) => {
 
         // Upload to Supabase Storage
         let voiceStorageUrl: string | null = null;
-        const storagePath = `voice/${Date.now()}_${ctx.from.id}.ogg`;
+        const storagePath = `voice/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.ogg`;
         const { error: uploadErr } = await supabase.storage
             .from("voice-messages")
             .upload(storagePath, voiceBuffer, { contentType: "audio/ogg" });

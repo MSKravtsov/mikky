@@ -42,7 +42,7 @@ registerTool({
         const workDir = (input.working_dir as string) || "/tmp";
         const timeout = ((input.timeout as number) || SANDBOX_TIMEOUT) * 1000; // ms
 
-        // Safety check: block obviously dangerous commands
+        // Safety check: block dangerous and secret-leaking commands
         const dangerousPatterns = [
             /\brm\s+-rf\s+\//,
             /\bmkfs\b/,
@@ -51,6 +51,16 @@ registerTool({
             /\bshutdown\b/,
             /\breboot\b/,
             />(\/dev|\/etc|\/usr|\/bin|\/sbin)/,
+            // Block secret/env leaking
+            /\benv\b/,
+            /\bprintenv\b/,
+            /\bexport\s+-p\b/,
+            /\$\w*(KEY|TOKEN|SECRET|PASSWORD|SUPABASE|ANTHROPIC|GROQ|TAVILY|OPENAI)/i,
+            /\.env\b/,
+            /process\.env\b/,
+            /\bcurl\b.*metadata/i,
+            /\bwget\b.*metadata/i,
+            /\bdocker\s+inspect\b/,
         ];
 
         for (const pattern of dangerousPatterns) {

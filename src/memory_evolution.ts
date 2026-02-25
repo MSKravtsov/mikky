@@ -129,24 +129,41 @@ function wordOverlap(a: string, b: string): number {
     return union.size === 0 ? 0 : intersection.size / union.size;
 }
 
+// ─── Remove duplicate memories (keep the newer one) ─────────────────
+export async function removeDuplicates(): Promise<{ removed: number }> {
+    const duplicates = await findDuplicates();
+    let removed = 0;
+
+    for (const dup of duplicates) {
+        // Keep the newer memory (higher id), delete the older one
+        const { error } = await supabase
+            .from("memories")
+            .delete()
+            .eq("id", dup.id1);
+        if (!error) removed++;
+    }
+
+    return { removed };
+}
+
 // ─── Run full maintenance cycle ──────────────────────────────────────
 export async function runMaintenance(): Promise<{
     decay: { affected: number };
     boost: { affected: number };
-    duplicates: number;
+    duplicatesRemoved: number;
 }> {
     const decay = await applyDecay();
     const boost = await boostFrequentlyAccessed();
-    const duplicates = await findDuplicates();
+    const { removed } = await removeDuplicates();
 
     console.log(
-        `🧹 Memory maintenance: decayed ${decay.affected}, boosted ${boost.affected}, found ${duplicates.length} potential duplicates`
+        `🧹 Memory maintenance: decayed ${decay.affected}, boosted ${boost.affected}, removed ${removed} duplicates`
     );
 
     return {
         decay,
         boost,
-        duplicates: duplicates.length,
+        duplicatesRemoved: removed,
     };
 }
 
