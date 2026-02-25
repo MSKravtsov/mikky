@@ -27,6 +27,7 @@ import "./tools/scheduler_tools.js";
 import "./tools/supabase_memory.js";
 import "./tools/multimodal.js";
 import "./tools/shell.js";
+import "./tools/web_search.js";
 
 import { bot } from "./bot.js";
 import { startScheduler } from "./scheduler.js";
